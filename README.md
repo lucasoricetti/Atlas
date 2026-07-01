@@ -216,12 +216,40 @@ In `docker-compose.yml` è applicato nativamente il driver `json-file` con rotaz
 - **WebAPI .NET**: IdentityModel logging elevato a `Warning` nel `appsettings.json` per nascondere il flooding della validazione JWT PII.
 - **Neo4j**: transaction log ridotti a una conservazione massima di `100M size` anziché 7 giorni, per risparmiare spazio disco.
 
-## 4) Diagramma architetturale
+## 4) Diagramma architetturale e Schermate di Atlas
 
 <details>
-<summary>Visualizza schema dell'architettura applicativa attuale</summary>
+<summary>Visualizza lo schema dell'architettura applicativa</summary>
 
-![Schema architetturale dell'applicazione](Schema_Architettura_Docker.drawio.png)
+![Schema architetturale dell'applicazione](Immagini/Schema_Architettura_Docker.drawio.png)
+
+</details>
+
+<details>
+<summary>Visualizza la pagina web "Elenco Assets"</summary>
+
+![Schermata elenco Assets](Immagini/Schermata_Asset_Focus_2.png)
+
+</details>
+
+<details>
+<summary>Visualizza la pagina web "Relazioni Assets"</summary>
+
+![Schermata relazioni Assets](Immagini/Schermata_Relazioni_Asset_2.png)
+
+</details>
+
+<details>
+<summary>Visualizza la pagina web "Filtri Interrogazione Grafo"</summary>
+
+![Schermata filtri interrogazione Grafo](Immagini/Schermata_Grafo_1_2.png)
+
+</details>
+
+<details>
+<summary>Visualizza la pagina web "Risultato Interrogazione Grafo"</summary>
+
+![Schermata risultato interrogazione Grafo](Immagini/Schermata_Grafo_2.png)
 
 </details>
 
