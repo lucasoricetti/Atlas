@@ -1,0 +1,35 @@
+providers:
+  docker:
+    # Docker provider via socket-proxy (evita mount diretto del docker.sock in Traefik).
+    endpoint: "tcp://atlas-socket-proxy:2375"
+    exposedByDefault: false
+    network: atlas-net
+  file:
+    # File provider per configurazioni dinamiche (es. certificati TLS).
+    filename: /etc/traefik/dynamic_conf.yml
+    watch: true
+
+entryPoints:
+  # NUOVO ENTRYPOINT PER L'APP PRINCIPALE
+  websecure:
+    address: ":443"
+
+  # NUOVO ENTRYPOINT PER NEO4J BROWSER
+  neo4j-browser:
+    address: ":7474"
+
+  # NUOVO ENTRYPOINT PER GRAFANA
+  grafana:
+    address: ":3000"
+
+  # Entrypoint interno per le metriche, NON mappato nella sezione ports del compose
+  metrics:
+    address: ":8082"
+
+metrics:
+  prometheus:
+    # Espone metriche Prometheus sull'entrypoint interno "metrics".
+    entryPoint: metrics
+    addEntryPointsLabels: true
+    addRoutersLabels: true
+    addServicesLabels: true

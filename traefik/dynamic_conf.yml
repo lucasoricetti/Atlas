@@ -1,0 +1,6 @@
+# Configurazione dinamica TLS caricata dal file provider di Traefik.
+tls:
+  certificates:
+    # Certificato e chiave montati dal compose dentro /certs.
+    - certFile: /certs/tls.crt
+      keyFile: /certs/tls.key

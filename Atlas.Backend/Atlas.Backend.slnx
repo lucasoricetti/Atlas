@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="Atlas.Backend.Application/Atlas.Backend.Application.csproj" />
+  <Project Path="Atlas.Backend.Core/Atlas.Backend.Core.csproj" />
+  <Project Path="Atlas.Backend.Infrastructure/Atlas.Backend.Infrastructure.csproj" />
+  <Project Path="Atlas.Backend.WebApi/Atlas.Backend.WebApi.csproj" />
+</Solution>

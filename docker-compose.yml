@@ -1,0 +1,354 @@
+name: atlas
+# DEVELOPMENT environment - certificati self-signed auto-generati
+
+services:
+  # [DEV ONLY] Genera certificati self-signed locali se non sono già presenti in ./certs.
+  # Questo servizio viene eseguito una sola volta all'avvio e non è presente in production.
+  certs-init:
+    image: alpine:${CERTS_INIT_IMAGE_TAG}
+    container_name: atlas-certs-init
+    restart: "no"
+    volumes:
+      - ./certs:/certs
+    command: >
+      sh -c "
+      apk add --no-cache openssl &&
+      mkdir -p /certs &&
+      if [ -d /certs/localhost-key.pem ] || [ -d /certs/localhost.pem ]; then
+        rm -rf /certs/localhost.pem /certs/localhost-key.pem;
+      fi &&
+      if [ ! -f /certs/localhost.pem ] || [ ! -f /certs/localhost-key.pem ]; then
+        openssl req -x509 -nodes -newkey rsa:2048 -keyout /certs/localhost-key.pem -out /certs/localhost.pem -days 3650 -subj '/CN=localhost';
+      fi
+      "
+    deploy:
+      resources:
+        limits:
+          cpus: '0.2'
+          memory: 128M
+    networks:
+      - atlas-net
+
+  # Espone in modo controllato un sottoinsieme della Docker API a Traefik.
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy:${SOCKET_PROXY_IMAGE_TAG}
+    container_name: atlas-socket-proxy
+    restart: unless-stopped
+    # niente security_opt a questo container, 
+    # altrimenti gli impediamo di eseguire il cambio utente necessario 
+    # per funzionare correttamente
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - CONTAINERS=1
+      - NETWORKS=1
+      - TASKS=0
+      - POST=0
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+        reservations:
+          memory: 64M
+    networks:
+      - atlas-net
+
+  # Reverse proxy/TLS entrypoint del sistema (web, Neo4j Browser, Grafana).
+  traefik:
+    image: traefik:${TRAEFIK_IMAGE_TAG}
+    container_name: atlas-traefik
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "443:443"
+      - "7474:7474"
+      - "3000:3000"
+    volumes:
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic_conf.yml:/etc/traefik/dynamic_conf.yml:ro
+      # [DEV] Certificati self-signed generati da certs-init (path da .env.dev)
+      - ${TRAEFIK_CERT_FILE_HOST}:/certs/tls.crt:ro
+      - ${TRAEFIK_CERT_KEY_FILE_HOST}:/certs/tls.key:ro
+    depends_on:
+      socket-proxy:
+        condition: service_started
+      certs-init:
+        condition: service_completed_successfully
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          memory: 128M
+    networks:
+      - atlas-net
+
+  # Raccolta metriche (Traefik e target futuri) per osservabilità.
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_IMAGE_TAG}
+    container_name: atlas-prometheus
+    user: "nobody"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - traefik.http.services.prometheus.loadbalancer.server.port=9090
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--log.level=warn'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+        reservations:
+          memory: 512M
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - atlas-net
+
+  # Dashboard di visualizzazione metriche.
+  grafana:
+    image: grafana/grafana:${GRAFANA_IMAGE_TAG}
+    container_name: atlas-grafana
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GF_SECURITY_ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD}
+      - GF_DATABASE_WAL=true
+      - GF_LOG_LEVEL=warn
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.atlas-grafana.rule=Host(`${ATLAS_HOST}`)
+      - traefik.http.routers.atlas-grafana.entrypoints=grafana
+      - traefik.http.routers.atlas-grafana.tls=true
+      - traefik.http.services.atlas-grafana.loadbalancer.server.port=3000
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          memory: 256M
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - atlas-net
+
+  # Database grafo principale dell'applicazione.
+  neo4j:
+    image: neo4j:${NEO4J_IMAGE_TAG}
+    container_name: atlas-neo4j
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      # Credenziali admin lette da variabili ambiente (ambiente locale/dev).
+      - NEO4J_AUTH=${NEO4J_USER}/${NEO4J_PASSWORD}
+      - NEO4J_server_default__listen__address=0.0.0.0
+      - NEO4J_server_bolt_advertised__address=neo4j:7687
+      - NEO4J_server_bolt_tls__level=DISABLED
+      - NEO4J_server_http_enabled=true
+      # Limiti di Memoria (sintassi corretta Neo4j 5)
+      - NEO4J_server_memory_heap_initial__size=512m
+      - NEO4J_server_memory_heap_max__size=1G
+      - NEO4J_server_memory_pagecache_size=512m
+      # 1. Limite ai Transaction Logs (sintassi Neo4j 5)
+      # Limita a 100 Megabyte (o a un 1 giorno) per non riempire il disco
+      - NEO4J_db_tx__log_rotation_retention__policy=1 files
+      - NEO4J_db_tx__log_rotation_size=100M
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.atlas-neo4j.rule=Host(`${ATLAS_HOST}`)
+      - traefik.http.routers.atlas-neo4j.entrypoints=neo4j-browser
+      - traefik.http.routers.atlas-neo4j.tls=true
+      - traefik.http.services.atlas-neo4j.loadbalancer.server.scheme=http
+      - traefik.http.services.atlas-neo4j.loadbalancer.server.port=7474
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m" # Un po' più grande per i log DB
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 3G
+        reservations:
+          memory: 1.5G
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474/ || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+    networks:
+      - atlas-net
+
+  # Job one-shot per inizializzare schema/dati nel DB appena avviato.
+  neo4j-init:
+    image: neo4j:${NEO4J_IMAGE_TAG}
+    container_name: atlas-neo4j-init
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    restart: "no"
+    volumes:
+      - ./neo4j_init/init.cypher:/init/init.cypher:ro
+    tmpfs:
+      - /data
+      - /logs
+    command: >
+      sh -c "cypher-shell -a ${NEO4J_URI} -u ${NEO4J_USER} -p ${NEO4J_PASSWORD} -d neo4j -f /init/init.cypher"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    networks:
+      - atlas-net
+
+  # Backend .NET Web API con dipendenza esplicita da Neo4j pronto.
+  webapi:
+    image: ${WEBAPI_IMAGE_REPOSITORY}:${WEBAPI_IMAGE_TAG}
+    build:
+      context: ./Atlas.Backend
+      dockerfile: Dockerfile
+    container_name: atlas-webapi
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      neo4j-init:
+        condition: service_completed_successfully
+    environment:
+      - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT}
+      - ASPNETCORE_URLS=${ASPNETCORE_URLS}
+      - NEO4J_URI=${NEO4J_URI}
+      - NEO4J_USER=${NEO4J_USER}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - NEO4J_DATABASE=${NEO4J_DATABASE}
+      - Cors__AllowedOrigins__0=${Cors__AllowedOrigins__0}
+      - AzureAd__Instance=${AZURE_AD_INSTANCE}
+      - AzureAd__TenantId=${AZURE_AD_TENANT_ID}
+      - AzureAd__ClientId=${AZURE_AD_CLIENT_ID}
+      - AzureAd__Audience=${AZURE_AD_AUDIENCE}
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.atlas-api.rule=Host(`${ATLAS_HOST}`) && (PathPrefix(`/api`) || Path(`/health`))
+      - traefik.http.routers.atlas-api.entrypoints=websecure
+      - traefik.http.routers.atlas-api.tls=true
+      - traefik.http.services.atlas-api.loadbalancer.server.scheme=http
+      - traefik.http.services.atlas-api.loadbalancer.server.port=8080
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1G
+        reservations:
+          memory: 256M
+    networks:
+      - atlas-net
+
+  # Frontend React/Vite servito da Nginx dietro Traefik.
+  frontend:
+    image: ${FRONTEND_IMAGE_REPOSITORY}:${FRONTEND_IMAGE_TAG}
+    build:
+      context: ./Atlas.Frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL}
+        VITE_AAD_CLIENT_ID: ${VITE_AAD_CLIENT_ID}
+        VITE_AAD_AUTHORITY: ${VITE_AAD_AUTHORITY}
+        VITE_API_SCOPE: ${VITE_API_SCOPE}
+        VITE_APP_ORIGIN: ${VITE_APP_ORIGIN:-}
+        VITE_AAD_REDIRECT_URI: ${VITE_AAD_REDIRECT_URI:-}
+        VITE_AAD_POST_LOGOUT_REDIRECT_URI: ${VITE_AAD_POST_LOGOUT_REDIRECT_URI:-}
+    container_name: atlas-frontend
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - VITE_API_BASE_URL=${VITE_API_BASE_URL}
+      - VITE_AAD_CLIENT_ID=${VITE_AAD_CLIENT_ID}
+      - VITE_AAD_AUTHORITY=${VITE_AAD_AUTHORITY}
+      - VITE_API_SCOPE=${VITE_API_SCOPE}
+      - VITE_APP_ORIGIN=${VITE_APP_ORIGIN:-}
+      - VITE_AAD_REDIRECT_URI=${VITE_AAD_REDIRECT_URI:-}
+      - VITE_AAD_POST_LOGOUT_REDIRECT_URI=${VITE_AAD_POST_LOGOUT_REDIRECT_URI:-}
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.atlas-frontend.rule=Host(`${ATLAS_HOST}`)
+      - traefik.http.routers.atlas-frontend.entrypoints=websecure
+      - traefik.http.routers.atlas-frontend.tls=true
+      - traefik.http.services.atlas-frontend.loadbalancer.server.scheme=http
+      - traefik.http.services.atlas-frontend.loadbalancer.server.port=80
+    depends_on:
+      webapi:
+        condition: service_started
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+        reservations:
+          memory: 64M
+    networks:
+      - atlas-net
+
+# Volumi persistenti dei componenti stateful.
+volumes:
+  neo4j_data:
+  neo4j_logs:
+  prometheus_data:
+  grafana_data:
+
+# Rete bridge condivisa tra tutti i servizi Atlas.
+networks:
+  atlas-net:
+    driver: bridge

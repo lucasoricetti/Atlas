@@ -1,0 +1,12 @@
+global:
+  # Frequenza con cui Prometheus interroga i target per le metriche.
+  scrape_interval: 15s
+  # Frequenza di valutazione delle eventuali regole/alert.
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Metriche di Traefik esposte sull'entrypoint interno "metrics".
+  - job_name: 'traefik'
+    static_configs:
+      # L'hostname corrisponde al container_name, la porta è l'entrypoint interno
+      - targets: ['atlas-traefik:8082']

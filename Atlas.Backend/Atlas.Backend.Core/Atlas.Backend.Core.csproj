@@ -1,0 +1,17 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>Atlas.Backend.Core</AssemblyName>
+    <RootNamespace>Atlas.Backend.Core</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="Relationships\**" />
+    <EmbeddedResource Remove="Relationships\**" />
+    <None Remove="Relationships\**" />
+  </ItemGroup>
+
+</Project>

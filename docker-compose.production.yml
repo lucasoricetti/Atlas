@@ -1,0 +1,333 @@
+name: atlas
+# PRODUCTION environment - certificati pre-forniti obbligatori (non auto-generati)
+
+services:
+  # Espone in modo controllato un sottoinsieme della Docker API a Traefik.
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy:${SOCKET_PROXY_IMAGE_TAG}
+    container_name: atlas-socket-proxy
+    restart: unless-stopped
+    # niente security_opt a questo container, 
+    # altrimenti gli impediamo di eseguire il cambio utente necessario 
+    # per funzionare correttamente
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - CONTAINERS=1
+      - NETWORKS=1
+      - TASKS=0
+      - POST=0
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+        reservations:
+          memory: 64M
+    networks:
+      - atlas-net
+
+  # Reverse proxy/TLS entrypoint del sistema (web, Neo4j Browser, Grafana).
+  traefik:
+    image: traefik:${TRAEFIK_IMAGE_TAG}
+    container_name: atlas-traefik
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "443:443"
+      - "7474:7474"
+      - "3000:3000"
+    volumes:
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic_conf.yml:/etc/traefik/dynamic_conf.yml:ro
+      # [PROD] Certificati pre-forniti (path assoluto da .env.prod)
+      - ${TRAEFIK_CERT_FILE_HOST}:/certs/tls.crt:ro
+      - ${TRAEFIK_CERT_KEY_FILE_HOST}:/certs/tls.key:ro
+    depends_on:
+      socket-proxy:
+        condition: service_started
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          memory: 128M
+    networks:
+      - atlas-net
+
+  # Raccolta metriche centralizzata.
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_IMAGE_TAG}
+    container_name: atlas-prometheus
+    user: "nobody"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - traefik.http.services.prometheus.loadbalancer.server.port=9090
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--log.level=warn'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+        reservations:
+          memory: 512M
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - atlas-net
+
+  # Dashboard metriche; password admin letta da Docker secret.
+  grafana:
+    image: grafana/grafana:${GRAFANA_IMAGE_TAG}
+    container_name: atlas-grafana
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+      GF_DATABASE_WAL: "true"
+      GF_LOG_LEVEL: warn
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.atlas-grafana.rule=Host(`${ATLAS_HOST}`)
+      - traefik.http.routers.atlas-grafana.entrypoints=grafana
+      - traefik.http.routers.atlas-grafana.tls=true
+      - traefik.http.services.atlas-grafana.loadbalancer.server.port=3000
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          memory: 256M
+    volumes:
+      - grafana_data:/var/lib/grafana
+    secrets:
+      - grafana_admin_password
+    networks:
+      - atlas-net
+
+  # Database grafo con password amministrativa gestita via secret.
+  neo4j:
+    image: neo4j:${NEO4J_IMAGE_TAG}
+    container_name: atlas-neo4j
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - NEO4J_server_default__listen__address=0.0.0.0
+      - NEO4J_server_bolt_advertised__address=neo4j:7687
+      - NEO4J_server_bolt_tls__level=DISABLED
+      - NEO4J_server_http_enabled=true
+      - NEO4J_server_memory_heap_initial__size=512m
+      - NEO4J_server_memory_heap_max__size=1G
+      - NEO4J_server_memory_pagecache_size=512m
+      - NEO4J_db_tx__log_rotation_retention__policy=1 files
+      - NEO4J_db_tx__log_rotation_size=100M
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        export NEO4J_AUTH="${NEO4J_USER}/$(cat /run/secrets/neo4j_admin_password)"
+        exec /startup/docker-entrypoint.sh neo4j
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.atlas-neo4j.rule=Host(`${ATLAS_HOST}`)
+      - traefik.http.routers.atlas-neo4j.entrypoints=neo4j-browser
+      - traefik.http.routers.atlas-neo4j.tls=true
+      - traefik.http.services.atlas-neo4j.loadbalancer.server.scheme=http
+      - traefik.http.services.atlas-neo4j.loadbalancer.server.port=7474
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 3G
+        reservations:
+          memory: 1.5G
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474/ || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+    secrets:
+      - neo4j_admin_password
+    networks:
+      - atlas-net
+
+  # Job one-shot che applica init.cypher (idempotente) quando il DB è healthy.
+  neo4j-init:
+    image: neo4j:${NEO4J_IMAGE_TAG}
+    container_name: atlas-neo4j-init
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    restart: "no"
+    volumes:
+      - ./neo4j_init/init.cypher:/init/init.cypher:ro
+    tmpfs:
+      - /data
+      - /logs
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      # Usa la password dal secret per eseguire il bootstrap del database.
+      - "cypher-shell -a \"${NEO4J_URI}\" -u \"${NEO4J_USER}\" -p \"$(cat /run/secrets/neo4j_admin_password)\" -d neo4j -f /init/init.cypher"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    secrets:
+      - neo4j_admin_password
+    networks:
+      - atlas-net
+
+  # Backend .NET; in produzione usa immagine prebuildata.
+  webapi:
+    # Qui in Prod non facciamo la Build ma ci appoggiamo all'immagine già buildata secondo la procedura.
+    image: ${WEBAPI_IMAGE_REPOSITORY}:${WEBAPI_IMAGE_TAG}
+    container_name: atlas-webapi
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      neo4j-init:
+        condition: service_completed_successfully
+    environment:
+      - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT}
+      - ASPNETCORE_URLS=${ASPNETCORE_URLS}
+      - NEO4J_URI=${NEO4J_URI}
+      - NEO4J_USER=${NEO4J_USER}
+      - NEO4J_DATABASE=${NEO4J_DATABASE}
+      - Cors__AllowedOrigins__0=${Cors__AllowedOrigins__0}
+      - AzureAd__Instance=${AZURE_AD_INSTANCE}
+      - AzureAd__TenantId=${AZURE_AD_TENANT_ID}
+      - AzureAd__ClientId=${AZURE_AD_CLIENT_ID}
+      - AzureAd__Audience=${AZURE_AD_AUDIENCE}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      # Esporta la password Neo4j dal secret prima dell'avvio della WebAPI.
+      - "export NEO4J_PASSWORD=\"$$(cat /run/secrets/neo4j_admin_password)\" && exec dotnet Atlas.Backend.WebApi.dll"
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.atlas-api.rule=Host(`${ATLAS_HOST}`) && (PathPrefix(`/api`) || Path(`/health`))
+      - traefik.http.routers.atlas-api.entrypoints=websecure
+      - traefik.http.routers.atlas-api.tls=true
+      - traefik.http.services.atlas-api.loadbalancer.server.scheme=http
+      - traefik.http.services.atlas-api.loadbalancer.server.port=8080
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1G
+        reservations:
+          memory: 256M
+    secrets:
+      - neo4j_admin_password
+    networks:
+      - atlas-net
+
+  # Frontend React/Vite; in produzione usa immagine prebuildata.
+  frontend:
+    # Qui in Prod non facciamo la Build ma ci appoggiamo all'immagine già buildata secondo la procedura.
+    image: ${FRONTEND_IMAGE_REPOSITORY}:${FRONTEND_IMAGE_TAG}
+    container_name: atlas-frontend
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - VITE_API_BASE_URL=${VITE_API_BASE_URL}
+      - VITE_AAD_CLIENT_ID=${VITE_AAD_CLIENT_ID}
+      - VITE_AAD_AUTHORITY=${VITE_AAD_AUTHORITY}
+      - VITE_API_SCOPE=${VITE_API_SCOPE}
+      - VITE_APP_ORIGIN=${VITE_APP_ORIGIN:-}
+      - VITE_AAD_REDIRECT_URI=${VITE_AAD_REDIRECT_URI:-}
+      - VITE_AAD_POST_LOGOUT_REDIRECT_URI=${VITE_AAD_POST_LOGOUT_REDIRECT_URI:-}
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.atlas-frontend.rule=Host(`${ATLAS_HOST}`)
+      - traefik.http.routers.atlas-frontend.entrypoints=websecure
+      - traefik.http.routers.atlas-frontend.tls=true
+      - traefik.http.services.atlas-frontend.loadbalancer.server.scheme=http
+      - traefik.http.services.atlas-frontend.loadbalancer.server.port=80
+    depends_on:
+      webapi:
+        condition: service_started
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+        reservations:
+          memory: 64M
+    networks:
+      - atlas-net
+
+# Volumi persistenti dei componenti stateful.
+volumes:
+  neo4j_data:
+  neo4j_logs:
+  prometheus_data:
+  grafana_data:
+
+# Rete bridge condivisa tra tutti i servizi Atlas.
+networks:
+  atlas-net:
+    driver: bridge
+
+# Secret file-based montati nei container che ne hanno bisogno.
+secrets:
+  neo4j_admin_password:
+    file: ${NEO4J_PASSWORD_FILE}
+  grafana_admin_password:
+    file: ${GRAFANA_ADMIN_PASSWORD_FILE}
