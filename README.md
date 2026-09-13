@@ -218,7 +218,7 @@ In `docker-compose.yml` è applicato nativamente il driver `json-file` con rotaz
 
 ## 4) Diagramma architetturale e Schermate di Atlas
 
-<details>
+<details open>
 <summary>Visualizza lo schema dell'architettura applicativa</summary>
 
 ![Schema architetturale dell'applicazione](Immagini/Schema_Architettura_Docker.drawio.png)
